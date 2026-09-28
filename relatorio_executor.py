@@ -197,7 +197,7 @@ def processar_relatorio():
             df_sigtm['OR'].fillna('').astype(str).str.strip().eq('') &
             df_sigtm['MEDICAO'].fillna('').astype(str).str.strip().eq('')
         )
-        df_rodar = df_sigtm.loc[mask_rodar, ['VTA PK']].copy()
+        df_rodar = df_sigtm.loc[mask_rodar, ['VTA PK', 'Data Criacao', 'Sigla Estado']].copy()
         df_rodar.rename(columns={'VTA PK': 'IONIX'}, inplace=True)
         print(f"[OK] Registros para a aba RODAR: {len(df_rodar):,}")
         print()
@@ -244,11 +244,15 @@ def processar_relatorio():
             worksheet.set_row(0, 20)
 
             worksheet_rodar = workbook.add_worksheet('RODAR')
-            worksheet_rodar.write(0, 0, 'IONIX', header_format)
-            for row_num, value in enumerate(df_rodar['IONIX'].tolist(), start=1):
-                worksheet_rodar.write(row_num, 0, str(value).strip(), cell_format)
-            max_len_rodar = max([len('IONIX')] + [len(str(v).strip()) for v in df_rodar['IONIX'].tolist()]) if len(df_rodar) else len('IONIX')
-            worksheet_rodar.set_column(0, 0, max(8, min(max_len_rodar + 2, 50)))
+            for col_num, col_name in enumerate(df_rodar.columns):
+                worksheet_rodar.write(0, col_num, str(col_name), header_format)
+            for row_num, row in enumerate(df_rodar.values, start=1):
+                for col_num, value in enumerate(row):
+                    worksheet_rodar.write(row_num, col_num, str(value).strip() if pd.notna(value) else '', cell_format)
+            for col_num, col_name in enumerate(df_rodar.columns):
+                col_data = df_rodar[col_name].astype(str)
+                max_len = col_data.str.len().max()
+                worksheet_rodar.set_column(col_num, col_num, max(8, min(max_len + 2, 50)))
             worksheet_rodar.set_row(0, 20)
 
             workbook.close()
