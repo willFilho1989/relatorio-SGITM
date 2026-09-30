@@ -6,7 +6,7 @@ import sys
 import re
 import unicodedata
 from datetime import datetime
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
 
 def obter_diretorio_base():
@@ -134,26 +134,18 @@ def processar_relatorio():
         "Entrada",
         ["SIGTM.xlsx", "SGCI.xlsx"],
     )
-    if entrada_dir is None:
-        raise FileNotFoundError(
-            "Arquivos SIGTM.xlsx e SGCI.xlsx não encontrados na pasta Entrada. "
-            f"Caminhos verificados: {', '.join(entradas_tentadas)}"
-        )
 
     saida_dir, saidas_tentadas = encontrar_diretorio_com_arquivos(
         diretorios_base,
         "Saida",
-        ["Relatorio_SIGTM.xlsx"],
+        [],
     )
-    if saida_dir is None:
-        raise FileNotFoundError(
-            "Arquivo Relatorio_SIGTM.xlsx não encontrado na pasta Saida. "
-            f"Caminhos verificados: {', '.join(saidas_tentadas)}"
-        )
+    if saida_dir:
+        os.makedirs(saida_dir, exist_ok=True)
 
-    output_file = os.path.join(saida_dir, "Relatorio_SIGTM.xlsx")
-    arquivo_sigtm = os.path.join(entrada_dir, "SIGTM.xlsx")
-    arquivo_sgci = os.path.join(entrada_dir, "SGCI.xlsx")
+    output_file = os.path.join(saida_dir, "Relatorio_SIGTM.xlsx") if saida_dir else None
+    arquivo_sigtm = os.path.join(entrada_dir, "SIGTM.xlsx") if entrada_dir else None
+    arquivo_sgci = os.path.join(entrada_dir, "SGCI.xlsx") if entrada_dir else None
     
     baixas_validas = {
         "DESCARGA ELÉTRICA",
@@ -180,6 +172,21 @@ def processar_relatorio():
     }
     
     try:
+        if entrada_dir is None:
+            raise FileNotFoundError(
+                "Arquivos SIGTM.xlsx e SGCI.xlsx não encontrados na pasta Entrada. "
+                f"Caminhos verificados: {', '.join(entradas_tentadas)}"
+            )
+        if saida_dir is None:
+            raise FileNotFoundError(
+                "Não foi possível localizar ou criar a pasta Saida. "
+                f"Caminhos verificados: {', '.join(saidas_tentadas)}"
+            )
+        if not os.path.exists(arquivo_sigtm):
+            raise FileNotFoundError(f"Arquivo SIGTM.xlsx não encontrado em {entrada_dir}")
+        if not os.path.exists(arquivo_sgci):
+            raise FileNotFoundError(f"Arquivo SGCI.xlsx não encontrado em {entrada_dir}")
+
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         if hasattr(sys.stderr, "reconfigure"):
@@ -312,7 +319,14 @@ def processar_relatorio():
         df_criar_or_existente = ler_aba_existente(output_file, 'CRIAR OR')
         colunas_rodar_padrao = ['IONIX', 'Data Criacao', 'Sigla Estado', 'MATERIAL', 'ENDEREÇO', 'QTD CABO', 'Possui Material?']
 
-        workbook = load_workbook(output_file)
+        if os.path.exists(output_file):
+            workbook = load_workbook(output_file)
+            print("[OK] Arquivo de saída existente localizado")
+        else:
+            workbook = Workbook()
+            if workbook.active is not None:
+                workbook.remove(workbook.active)
+            print("[OK] Arquivo de saída não encontrado; será criado um novo")
         if 'RODAR' in workbook.sheetnames:
             ws_rodar = workbook['RODAR']
             cabecalhos_rodar = []
