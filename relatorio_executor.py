@@ -1,13 +1,13 @@
 import pandas as pd
 import os
+import gc
 import warnings
 warnings.filterwarnings('ignore')
 import sys
 import re
 import unicodedata
 from datetime import datetime
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
+import win32com.client
 
 def obter_diretorio_base():
     if getattr(sys, "frozen", False):
@@ -17,17 +17,25 @@ def obter_diretorio_base():
 def encontrar_diretorio_com_arquivos(candidatos_base, subpasta, arquivos_obrigatorios):
     caminhos_tentados = []
     vistos = set()
+    primeiro_candidato = None
     for base in candidatos_base:
         if not base:
             continue
         caminho = os.path.normpath(os.path.join(base, subpasta))
+        if primeiro_candidato is None:
+            primeiro_candidato = caminho
         chave = caminho.lower()
         if chave in vistos:
             continue
         vistos.add(chave)
         caminhos_tentados.append(caminho)
-        if all(os.path.exists(os.path.join(caminho, nome)) for nome in arquivos_obrigatorios):
+        if arquivos_obrigatorios:
+            if all(os.path.exists(os.path.join(caminho, nome)) for nome in arquivos_obrigatorios):
+                return caminho, caminhos_tentados
+        elif os.path.isdir(caminho):
             return caminho, caminhos_tentados
+    if not arquivos_obrigatorios and primeiro_candidato is not None:
+        return primeiro_candidato, caminhos_tentados
     return None, caminhos_tentados
 
 def mostrar_dialogo(titulo, mensagem, erro=False):
@@ -119,6 +127,39 @@ def obter_coluna_por_nome(df, nome_esperado):
             return coluna
     return None
 
+def escrever_df_em_aba_excel(ws, df_aba):
+    df_texto = df_aba.fillna('').astype(str).copy()
+    for col in df_texto.columns:
+        serie = df_texto[col]
+        serie = serie.map(lambda x: ''.join(ch for ch in str(x) if ord(ch) >= 32 or ch in ('\t', '\n', '\r')))
+        serie = serie.map(lambda x: x[:32767] if len(x) > 32767 else x)
+        serie = serie.map(lambda x: "'" + x if x and x[0] in ('=', '+', '-', '@') and not x.startswith("'") else x)
+        df_texto[col] = serie
+
+    cabecalhos = [str(c) for c in df_texto.columns]
+    valores = [cabecalhos] + df_texto.values.tolist()
+    ws.Cells.ClearContents()
+    if not valores:
+        return
+
+    nrows = len(valores)
+    ncols = len(valores[0])
+    intervalo = ws.Range(ws.Cells(1, 1), ws.Cells(nrows, ncols))
+    intervalo.Value = tuple(tuple(linha) for linha in valores)
+    intervalo.WrapText = False
+
+    ws.Rows(1).Font.Bold = True
+    ws.Rows(1).RowHeight = 20
+
+    ws.Range(ws.Cells(1, 1), ws.Cells(nrows, ncols)).Columns.AutoFit()
+    for col_num, col_name in enumerate(df_texto.columns, start=1):
+        col_data = df_texto[col_name].astype(str)
+        max_len = max([len(str(col_name))] + col_data.str.len().tolist())
+        largura = max(8, min(max_len + 2, 50))
+        ws.Columns(col_num).ColumnWidth = largura
+
+
+
 def processar_relatorio():
     """Processa e gera o relatório SIGTM com dados do SGCI"""
     
@@ -143,7 +184,8 @@ def processar_relatorio():
     if saida_dir:
         os.makedirs(saida_dir, exist_ok=True)
 
-    output_file = os.path.join(saida_dir, "Relatorio_SIGTM.xlsx") if saida_dir else None
+    output_file = os.path.join(saida_dir, "Relatorio_SIGTM.xlsb") if saida_dir else None
+    output_file_legacy_xlsx = os.path.join(saida_dir, "Relatorio_SIGTM.xlsx") if saida_dir else None
     arquivo_sigtm = os.path.join(entrada_dir, "SIGTM.xlsx") if entrada_dir else None
     arquivo_sgci = os.path.join(entrada_dir, "SGCI.xlsx") if entrada_dir else None
     
@@ -186,6 +228,8 @@ def processar_relatorio():
             raise FileNotFoundError(f"Arquivo SIGTM.xlsx não encontrado em {entrada_dir}")
         if not os.path.exists(arquivo_sgci):
             raise FileNotFoundError(f"Arquivo SGCI.xlsx não encontrado em {entrada_dir}")
+        if output_file_legacy_xlsx and os.path.exists(output_file_legacy_xlsx):
+            os.remove(output_file_legacy_xlsx)
 
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -276,7 +320,13 @@ def processar_relatorio():
         # ===== CRUZAMENTO COM SGCI =====
         print("Lendo arquivo SGCI.xlsx...")
         df_sgci = pd.read_excel(arquivo_sgci)
-        df_sgci_lookup = df_sgci[['Serviço (Boletim de Anormalidade)', 'Serviço (número)', 'Medição (número)']].copy()
+        df_sgci_lookup = df_sgci[[
+            'Serviço (Boletim de Anormalidade)',
+            'Serviço (número)',
+            'Medição (número)',
+            'Ata de Estudo Prévio (título)',
+            'Serviço (Ordem Interna)',
+        ]].copy()
         print(f"  Total: {len(df_sgci_lookup):,} registros")
         print()
         
@@ -292,19 +342,31 @@ def processar_relatorio():
             if key not in lookup_dict:
                 or_val = row['Serviço (número)']
                 med_val = row['Medição (número)']
+                ata_val = row['Ata de Estudo Prévio (título)']
+                ordem_interna_val = row['Serviço (Ordem Interna)']
                 
                 lookup_dict[key] = {
                     'OR': str(int(or_val)) if pd.notna(or_val) else '',
-                    'MEDICAO': str(int(med_val)) if pd.notna(med_val) else ''
+                    'MEDICAO': str(int(med_val)) if pd.notna(med_val) else '',
+                    'ATA_ESTUDO_PREVIO': str(ata_val).strip() if pd.notna(ata_val) else '',
+                    'ORDEM_INTERNA': str(ordem_interna_val).strip() if pd.notna(ordem_interna_val) else ''
                 }
-        
+
         df_sigtm['OR'] = df_sigtm['VTA PK'].astype(str).map(lambda x: lookup_dict.get(x, {}).get('OR', ''))
         df_sigtm['MEDICAO'] = df_sigtm['VTA PK'].astype(str).map(lambda x: lookup_dict.get(x, {}).get('MEDICAO', ''))
-        
+        df_sigtm['Ata de Estudo Prévio (título)'] = df_sigtm['VTA PK'].astype(str).map(
+            lambda x: lookup_dict.get(x, {}).get('ATA_ESTUDO_PREVIO', '')
+        )
+        df_sigtm['Serviço (Ordem Interna)'] = df_sigtm['VTA PK'].astype(str).map(
+            lambda x: lookup_dict.get(x, {}).get('ORDEM_INTERNA', '')
+        )
+
         or_count = (df_sigtm['OR'] != '').sum()
         med_count = (df_sigtm['MEDICAO'] != '').sum()
         print(f"[OK] Registros com OR preenchido: {or_count:,}")
         print(f"[OK] Registros com MEDICAO preenchido: {med_count:,}")
+        print(f"[OK] Registros com Ata de Estudo Prévio preenchido: {(df_sigtm['Ata de Estudo Prévio (título)'] != '').sum():,}")
+        print(f"[OK] Registros com Serviço (Ordem Interna) preenchido: {(df_sigtm['Serviço (Ordem Interna)'] != '').sum():,}")
         print()
 
         # Aba RODAR: itens sem OR e sem MEDICAO
@@ -316,89 +378,68 @@ def processar_relatorio():
         df_rodar.rename(columns={'VTA PK': 'IONIX'}, inplace=True)
         df_rodar = limpar_texto_df(df_rodar)
 
-        df_criar_or_existente = ler_aba_existente(output_file, 'CRIAR OR')
         colunas_rodar_padrao = ['IONIX', 'Data Criacao', 'Sigla Estado', 'MATERIAL', 'ENDEREÇO', 'QTD CABO', 'Possui Material?']
 
         if os.path.exists(output_file):
-            workbook = load_workbook(output_file)
+            pass
             print("[OK] Arquivo de saída existente localizado")
         else:
-            workbook = Workbook()
-            if workbook.active is not None:
-                workbook.remove(workbook.active)
-            print("[OK] Arquivo de saída não encontrado; será criado um novo")
-        if 'RODAR' in workbook.sheetnames:
-            ws_rodar = workbook['RODAR']
-            cabecalhos_rodar = []
-            for cell in ws_rodar[1]:
-                valor = str(cell.value).strip() if cell.value is not None else ''
-                if valor:
-                    cabecalhos_rodar.append(valor)
-            if not cabecalhos_rodar:
-                cabecalhos_rodar = colunas_rodar_padrao[:]
-            if 'IONIX' not in cabecalhos_rodar:
-                cabecalhos_rodar.insert(0, 'IONIX')
-        else:
-            ws_rodar = workbook.create_sheet('RODAR')
-            cabecalhos_rodar = colunas_rodar_padrao[:]
-
-        for col in cabecalhos_rodar:
-            if col not in df_rodar.columns:
-                df_rodar[col] = ''
-        df_rodar = limpar_texto_df(df_rodar.reindex(columns=cabecalhos_rodar, fill_value=''))
+            raise FileNotFoundError(
+                f"Arquivo de saída .xlsb não encontrado em {output_file}. "
+                "Ele precisa existir para preservar as abas CRIAR OR e MODELO LARA."
+            )
 
         print(f"[OK] Registros para a aba RODAR: {len(df_rodar):,}")
-        if df_criar_or_existente is not None:
-            print(f"[OK] Aba 'CRIAR OR' preservada: {len(df_criar_or_existente):,} linhas")
         print()
         
-        # ===== SALVAR COMO XLSX =====
+        # ===== SALVAR COMO XLSB =====
         print("Atualizando arquivo Excel existente...")
-
-        header_fill = PatternFill(fill_type="solid", start_color="4472C4", end_color="4472C4")
-        header_font = Font(bold=True, color="FFFFFF")
-        border = Border(
-            left=Side(style="thin", color="000000"),
-            right=Side(style="thin", color="000000"),
-            top=Side(style="thin", color="000000"),
-            bottom=Side(style="thin", color="000000"),
-        )
-        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
-        cell_alignment = Alignment(horizontal="left", vertical="top", wrap_text=False)
-
-        def atualizar_aba(nome_aba, df_aba):
-            if nome_aba in workbook.sheetnames:
-                ws = workbook[nome_aba]
-                if ws.max_row > 1:
-                    ws.delete_rows(2, ws.max_row - 1)
-            else:
-                ws = workbook.create_sheet(nome_aba)
-
-            for col_num, col_name in enumerate(df_aba.columns, start=1):
-                cell = ws.cell(row=1, column=col_num, value=str(col_name))
-                cell.fill = header_fill
-                cell.font = header_font
-                cell.border = border
-                cell.alignment = header_alignment
-
-            for row_num, row in enumerate(df_aba.values, start=2):
-                for col_num, value in enumerate(row, start=1):
-                    cell = ws.cell(row=row_num, column=col_num, value=sanitizar_valor_excel(value))
-                    cell.border = border
-                    cell.alignment = cell_alignment
-
-            ws.row_dimensions[1].height = 20
-            for col_num, col_name in enumerate(df_aba.columns, start=1):
-                col_data = df_aba[col_name].astype(str)
-                max_len = col_data.str.len().max()
-                largura = max(8, min(max_len + 2, 50))
-                ws.column_dimensions[ws.cell(row=1, column=col_num).column_letter].width = largura
-
-        atualizar_aba('SIGTM', df_sigtm)
-        atualizar_aba('RODAR', df_rodar)
-        # MODELO LARA é preservado - nunca alterado durante atualizações
+        excel = None
+        workbook = None
+        ws_sigtm = None
+        ws_rodar = None
         try:
-            workbook.save(output_file)
+            excel = win32com.client.DispatchEx("Excel.Application")
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            workbook = excel.Workbooks.Open(os.path.abspath(output_file))
+
+            nomes_abas = [ws.Name for ws in workbook.Worksheets]
+            if 'SIGTM' in nomes_abas:
+                ws_sigtm = workbook.Worksheets('SIGTM')
+            else:
+                ws_sigtm = workbook.Worksheets.Add(Before=workbook.Worksheets(1))
+                ws_sigtm.Name = 'SIGTM'
+
+            cabecalhos_rodar = []
+            if 'RODAR' in nomes_abas:
+                ws_rodar = workbook.Worksheets('RODAR')
+                total_cols_rodar = int(ws_rodar.UsedRange.Columns.Count)
+                for col_idx in range(1, total_cols_rodar + 1):
+                    valor = ws_rodar.Cells(1, col_idx).Value
+                    texto = str(valor).strip() if valor is not None else ''
+                    if texto:
+                        cabecalhos_rodar.append(texto)
+            else:
+                ws_rodar = workbook.Worksheets.Add(After=ws_sigtm)
+                ws_rodar.Name = 'RODAR'
+
+            if not cabecalhos_rodar:
+                cabecalhos_rodar = colunas_rodar_padrao[:]
+            cabecalhos_rodar = colunas_rodar_padrao + [c for c in cabecalhos_rodar if c not in colunas_rodar_padrao]
+
+            for col in cabecalhos_rodar:
+                if col not in df_rodar.columns:
+                    df_rodar[col] = ''
+            df_rodar_saida = limpar_texto_df(df_rodar.reindex(columns=cabecalhos_rodar, fill_value=''))
+
+            print("[OK] Escrevendo aba SIGTM...")
+            escrever_df_em_aba_excel(ws_sigtm, df_sigtm)
+            print("[OK] Escrevendo aba RODAR...")
+            escrever_df_em_aba_excel(ws_rodar, df_rodar_saida)
+
+            print("[OK] Salvando workbook...")
+            workbook.Save()
         except Exception as e:
             erro_txt = str(e)
             if 'Permission denied' in erro_txt or 'Errno 13' in erro_txt or e.__class__.__name__ == 'FileCreateError':
@@ -407,8 +448,16 @@ def processar_relatorio():
                 ) from e
             raise
         finally:
-            workbook.close()
-        
+            ws_rodar = None
+            ws_sigtm = None
+            if workbook is not None:
+                workbook.Close(SaveChanges=False)
+                workbook = None
+            if excel is not None:
+                excel.Quit()
+                excel = None
+            gc.collect()
+
         print(f"[OK] Arquivo salvo: {output_file}")
         print()
         print("=" * 80)
@@ -418,7 +467,7 @@ def processar_relatorio():
         print(f"Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
         mostrar_dialogo(
             "Relatorio gerado",
-            f"Relatorio_SIGTM.xlsx gerado com sucesso.\n\nTotal de registros: {len(df_sigtm):,}\nArquivo: {output_file}",
+            f"Relatorio_SIGTM.xlsb gerado com sucesso.\n\nTotal de registros: {len(df_sigtm):,}\nArquivo: {output_file}",
         )
         return True
         

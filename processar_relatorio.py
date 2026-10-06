@@ -1,12 +1,104 @@
 import pandas as pd
 import os
+import gc
+import shutil
+import tempfile
 import warnings
 warnings.filterwarnings('ignore')
 import xlsxwriter
 import numpy as np
+import win32com.client
 
 entrada_dir = r"C:\Users\WILLIAM.FILHO\PycharmProjects\relatorio-SGITM\Entrada"
 saida_dir = r"C:\Users\WILLIAM.FILHO\PycharmProjects\relatorio-SGITM\Saida"
+
+def escrever_df_em_aba_excel(ws, df_aba):
+    df_texto = df_aba.fillna('').astype(str).copy()
+    for col in df_texto.columns:
+        serie = df_texto[col]
+        serie = serie.map(lambda x: ''.join(ch for ch in str(x) if ord(ch) >= 32 or ch in ('\t', '\n', '\r')))
+        serie = serie.map(lambda x: x[:32767] if len(x) > 32767 else x)
+        serie = serie.map(lambda x: "'" + x if x and x[0] in ('=', '+', '-', '@') and not x.startswith("'") else x)
+        df_texto[col] = serie
+
+    cabecalhos = [str(c) for c in df_texto.columns]
+    valores = [cabecalhos] + df_texto.values.tolist()
+    ws.Cells.ClearContents()
+    if not valores:
+        return
+
+    nrows = len(valores)
+    ncols = len(valores[0])
+    intervalo = ws.Range(ws.Cells(1, 1), ws.Cells(nrows, ncols))
+    intervalo.Value = tuple(tuple(linha) for linha in valores)
+    intervalo.WrapText = False
+
+    ws.Rows(1).Font.Bold = True
+    ws.Rows(1).RowHeight = 20
+
+    ws.Range(ws.Cells(1, 1), ws.Cells(nrows, ncols)).Columns.AutoFit()
+    for col_num, col_name in enumerate(df_texto.columns, start=1):
+        col_data = df_texto[col_name].astype(str)
+        max_len = max([len(str(col_name))] + col_data.str.len().tolist())
+        largura = max(8, min(max_len + 2, 50))
+        ws.Columns(col_num).ColumnWidth = largura
+
+def encontrar_template_xlsb(diretorio_base):
+    candidatos = [
+        os.path.join(diretorio_base, "dist", "Saida", "Relatorio_SIGTM.xlsb"),
+        os.path.join(os.path.dirname(diretorio_base), "dist", "Saida", "Relatorio_SIGTM.xlsb"),
+        os.path.join(os.getcwd(), "dist", "Saida", "Relatorio_SIGTM.xlsb"),
+        os.path.join(diretorio_base, "Saida", "Relatorio_SIGTM.xlsb"),
+    ]
+    for candidato in candidatos:
+        if os.path.exists(candidato):
+            return candidato
+    return None
+
+def publicar_xlsb_com_template(caminho_xlsx, caminho_xlsb, abas_para_substituir, template_xlsb):
+    excel = None
+    workbook_origem = None
+    workbook_destino = None
+    template_temporario = None
+    try:
+        template_origem = template_xlsb
+        if os.path.abspath(template_origem).lower() == os.path.abspath(caminho_xlsb).lower():
+            if not os.path.exists(caminho_xlsb):
+                raise FileNotFoundError("Template XLSB indisponível para gerar o relatório.")
+            template_temporario = os.path.join(
+                tempfile.gettempdir(),
+                f"Relatorio_SIGTM_template_{os.getpid()}.xlsb",
+            )
+            shutil.copy2(caminho_xlsb, template_temporario)
+            template_origem = template_temporario
+
+        if os.path.exists(caminho_xlsb):
+            os.remove(caminho_xlsb)
+        shutil.copy2(template_origem, caminho_xlsb)
+        excel = win32com.client.DispatchEx('Excel.Application')
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        workbook_origem = excel.Workbooks.Open(os.path.abspath(caminho_xlsx), ReadOnly=True)
+        workbook_destino = excel.Workbooks.Open(os.path.abspath(caminho_xlsb))
+
+        for nome_aba in abas_para_substituir:
+            if nome_aba in [ws.Name for ws in workbook_destino.Worksheets]:
+                workbook_destino.Worksheets(nome_aba).Delete()
+
+        for nome_aba in reversed(abas_para_substituir):
+            if nome_aba in [ws.Name for ws in workbook_origem.Worksheets]:
+                workbook_origem.Worksheets(nome_aba).Copy(Before=workbook_destino.Worksheets(1))
+
+        workbook_destino.Save()
+    finally:
+        if workbook_destino is not None:
+            workbook_destino.Close(SaveChanges=False)
+        if workbook_origem is not None:
+            workbook_origem.Close(SaveChanges=False)
+        if excel is not None:
+            excel.Quit()
+        if template_temporario is not None and os.path.exists(template_temporario):
+            os.remove(template_temporario)
 
 baixas_validas = {
     "DESCARGA ELÉTRICA",
@@ -87,7 +179,13 @@ print("\nLendo arquivo SGCI.xlsx...")
 df_sgci = pd.read_excel(os.path.join(entrada_dir, "SGCI.xlsx"))
 
 # Selecionar apenas as colunas necessárias do SGCI
-df_sgci_lookup = df_sgci[['Serviço (Boletim de Anormalidade)', 'Serviço (número)', 'Medição (número)']].copy()
+df_sgci_lookup = df_sgci[[
+    'Serviço (Boletim de Anormalidade)',
+    'Serviço (número)',
+    'Medição (número)',
+    'Ata de Estudo Prévio (título)',
+    'Serviço (Ordem Interna)',
+]].copy()
 
 print(f"Registros SGCI: {len(df_sgci_lookup)}")
 print("Fazendo cruzamento de dados...")
@@ -105,68 +203,72 @@ for idx, row in df_sgci_lookup.iterrows():
     if key not in lookup_dict:
         or_val = row['Serviço (número)']
         med_val = row['Medição (número)']
+        ata_val = row['Ata de Estudo Prévio (título)']
+        ordem_interna_val = row['Serviço (Ordem Interna)']
         
         lookup_dict[key] = {
             'OR': str(int(or_val)) if pd.notna(or_val) else '',
-            'MEDICAO': str(int(med_val)) if pd.notna(med_val) else ''
+            'MEDICAO': str(int(med_val)) if pd.notna(med_val) else '',
+            'ATA_ESTUDO_PREVIO': str(ata_val).strip() if pd.notna(ata_val) else '',
+            'ORDEM_INTERNA': str(ordem_interna_val).strip() if pd.notna(ordem_interna_val) else ''
         }
 
 # Adicionar colunas OR e MEDICAO
 df_sigtm['OR'] = df_sigtm['VTA PK'].astype(str).map(lambda x: lookup_dict.get(x, {}).get('OR', ''))
 df_sigtm['MEDICAO'] = df_sigtm['VTA PK'].astype(str).map(lambda x: lookup_dict.get(x, {}).get('MEDICAO', ''))
+df_sigtm['Ata de Estudo Prévio (título)'] = df_sigtm['VTA PK'].astype(str).map(
+    lambda x: lookup_dict.get(x, {}).get('ATA_ESTUDO_PREVIO', '')
+)
+df_sigtm['Serviço (Ordem Interna)'] = df_sigtm['VTA PK'].astype(str).map(
+    lambda x: lookup_dict.get(x, {}).get('ORDEM_INTERNA', '')
+)
 
 print(f"Registros com OR preenchido: {(df_sigtm['OR'] != '').sum()}")
 print(f"Registros com MEDICAO preenchido: {(df_sigtm['MEDICAO'] != '').sum()}")
+print(f"Registros com Ata de Estudo Prévio preenchido: {(df_sigtm['Ata de Estudo Prévio (título)'] != '').sum()}")
+print(f"Registros com Serviço (Ordem Interna) preenchido: {(df_sigtm['Serviço (Ordem Interna)'] != '').sum()}")
 
 # ===== SALVAR COMO XLSX =====
 print("\nGerando arquivo Excel...")
-output_file = os.path.join(saida_dir, "Relatorio_SIGTM.xlsx")
+output_file = os.path.join(saida_dir, "Relatorio_SIGTM.xlsb")
+legacy_xlsx = os.path.join(saida_dir, "Relatorio_SIGTM.xlsx")
+if os.path.exists(legacy_xlsx):
+    os.remove(legacy_xlsx)
+if not os.path.exists(output_file):
+    raise FileNotFoundError(
+        f"Arquivo de saída .xlsb não encontrado em {output_file}. "
+        "Ele precisa existir para preservar as abas CRIAR OR e MODELO LARA."
+    )
 
-workbook = xlsxwriter.Workbook(output_file, {'strings_to_formulas': False, 'nan_inf_to_errors': True})
-worksheet = workbook.add_worksheet('SIGTM')
+excel = None
+workbook = None
+ws_sigtm = None
+ws_rodar = None
+try:
+    excel = win32com.client.DispatchEx('Excel.Application')
+    excel.Visible = False
+    excel.DisplayAlerts = False
+    workbook = excel.Workbooks.Open(os.path.abspath(output_file))
 
-# Formato do cabeçalho
-header_format = workbook.add_format({
-    'bold': True,
-    'bg_color': '#4472C4',
-    'font_color': 'white',
-    'border': 1,
-    'align': 'center',
-    'valign': 'vcenter',
-    'text_wrap': False
-})
+    nomes_abas = [ws.Name for ws in workbook.Worksheets]
+    if 'SIGTM' in nomes_abas:
+        ws_sigtm = workbook.Worksheets('SIGTM')
+    else:
+        ws_sigtm = workbook.Worksheets.Add(Before=workbook.Worksheets(1))
+        ws_sigtm.Name = 'SIGTM'
 
-# Formato de célula
-cell_format = workbook.add_format({
-    'border': 1,
-    'align': 'left',
-    'valign': 'top',
-    'text_wrap': False
-})
-
-# Escrever cabeçalhos
-for col_num, col_name in enumerate(df_sigtm.columns):
-    worksheet.write(0, col_num, str(col_name), header_format)
-
-# Escrever dados
-for row_num, row in enumerate(df_sigtm.values, start=1):
-    for col_num, value in enumerate(row):
-        # Converter para string e sanitizar
-        str_value = str(value).strip() if pd.notna(value) else ''
-        worksheet.write(row_num, col_num, str_value, cell_format)
-
-# Ajustar largura das colunas - IMPORTANTE: Garantir que nenhuma coluna tenha largura 0
-for col_num, col_name in enumerate(df_sigtm.columns):
-    col_data = df_sigtm[col_name].astype(str)
-    max_len = col_data.str.len().max()
-    # Mínimo de 8 caracteres, máximo de 50
-    width = max(8, min(max_len + 2, 50))
-    worksheet.set_column(col_num, col_num, width)
-
-# Altura do cabeçalho
-worksheet.set_row(0, 20)
-
-workbook.close()
+    escrever_df_em_aba_excel(ws_sigtm, df_sigtm)
+    workbook.Save()
+finally:
+    ws_rodar = None
+    ws_sigtm = None
+    if workbook is not None:
+        workbook.Close(SaveChanges=False)
+        workbook = None
+    if excel is not None:
+        excel.Quit()
+        excel = None
+    gc.collect()
 
 print(f"\n✓ Relatório salvo com sucesso!")
 print(f"✓ Arquivo: {output_file}")
@@ -175,4 +277,3 @@ print(f"✓ Data Criacao: {(df_sigtm['Data Criacao'] != '').sum()} registros com
 print(f"✓ Mês de criacao: {(df_sigtm['Mês de criacao'] != '').sum()} registros com dados")
 print(f"✓ Colunas OR e MEDICAO preenchidas")
 print(f"✓ Todas as colunas visíveis com largura adequada")
-
