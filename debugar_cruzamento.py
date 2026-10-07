@@ -1,8 +1,14 @@
 import pandas as pd
 import os
 import numpy as np
+import sys
 
-entrada_dir = r"C:\Users\WILLIAM.FILHO\PycharmProjects\relatorio-SGITM\Entrada"
+def obter_diretorio_base():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+entrada_dir = os.path.normpath(os.path.join(obter_diretorio_base(), "Entrada"))
 
 # Ler SIGTM
 df_sigtm = pd.read_excel(os.path.join(entrada_dir, "SIGTM.xlsx"))

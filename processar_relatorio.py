@@ -8,9 +8,15 @@ warnings.filterwarnings('ignore')
 import xlsxwriter
 import numpy as np
 import win32com.client
+import sys
 
-entrada_dir = r"C:\Users\WILLIAM.FILHO\PycharmProjects\relatorio-SGITM\Entrada"
-saida_dir = r"C:\Users\WILLIAM.FILHO\PycharmProjects\relatorio-SGITM\Saida"
+def obter_diretorio_base():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+entrada_dir = os.path.normpath(os.path.join(obter_diretorio_base(), "Entrada"))
+saida_dir = os.path.normpath(os.path.join(obter_diretorio_base(), "Saida"))
 
 def escrever_df_em_aba_excel(ws, df_aba):
     df_texto = df_aba.fillna('').astype(str).copy()
