@@ -6,6 +6,7 @@ warnings.filterwarnings('ignore')
 import sys
 import re
 import unicodedata
+import shutil
 from datetime import datetime
 import win32com.client
 
@@ -13,6 +14,30 @@ def obter_diretorio_base():
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+def obter_diretorio_bundle():
+    return getattr(sys, "_MEIPASS", None)
+
+def obter_diretorios_base():
+    base_dir = obter_diretorio_base()
+    candidatos = [
+        base_dir,
+        os.path.dirname(base_dir),
+        os.getcwd(),
+        obter_diretorio_bundle(),
+    ]
+    resultado = []
+    vistos = set()
+    for caminho in candidatos:
+        if not caminho:
+            continue
+        caminho_norm = os.path.normpath(caminho)
+        chave = caminho_norm.lower()
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        resultado.append(caminho_norm)
+    return resultado
 
 def encontrar_diretorio_com_arquivos(candidatos_base, subpasta, arquivos_obrigatorios):
     caminhos_tentados = []
@@ -37,6 +62,51 @@ def encontrar_diretorio_com_arquivos(candidatos_base, subpasta, arquivos_obrigat
     if not arquivos_obrigatorios and primeiro_candidato is not None:
         return primeiro_candidato, caminhos_tentados
     return None, caminhos_tentados
+
+def localizar_template_saida(candidatos_base):
+    nomes_template = ["Relatorio_SIGTM.xlsb", "Template.xlsb", "Template.xlsx"]
+    caminhos_tentados = []
+    for base in candidatos_base:
+        pasta_saida = os.path.normpath(os.path.join(base, "Saida"))
+        for nome in nomes_template:
+            candidato = os.path.join(pasta_saida, nome)
+            caminhos_tentados.append(candidato)
+            if os.path.exists(candidato):
+                return candidato, caminhos_tentados
+    return None, caminhos_tentados
+
+def converter_template_xlsx_para_xlsb(template_xlsx, output_file):
+    excel = None
+    workbook = None
+    try:
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        workbook = excel.Workbooks.Open(os.path.abspath(template_xlsx), ReadOnly=True)
+        workbook.SaveAs(os.path.abspath(output_file), FileFormat=50)
+    finally:
+        if workbook is not None:
+            workbook.Close(SaveChanges=False)
+        if excel is not None:
+            excel.Quit()
+
+def garantir_arquivo_saida(output_file, candidatos_base):
+    if os.path.exists(output_file):
+        return
+
+    template_path, templates_tentados = localizar_template_saida(candidatos_base)
+    if template_path is None:
+        raise FileNotFoundError(
+            "Arquivo base para geração do relatório não encontrado. "
+            "Inclua 'Relatorio_SIGTM.xlsb', 'Template.xlsb' ou 'Template.xlsx' na pasta Saida. "
+            f"Caminhos verificados: {', '.join(templates_tentados)}"
+        )
+
+    extensao = os.path.splitext(template_path)[1].lower()
+    if extensao == ".xlsx":
+        converter_template_xlsx_para_xlsb(template_path, output_file)
+    else:
+        shutil.copy2(template_path, output_file)
 
 def mostrar_dialogo(titulo, mensagem, erro=False):
     if not getattr(sys, "frozen", False):
@@ -163,12 +233,7 @@ def escrever_df_em_aba_excel(ws, df_aba):
 def processar_relatorio():
     """Processa e gera o relatório SIGTM com dados do SGCI"""
     
-    base_dir = obter_diretorio_base()
-    diretorios_base = [
-        base_dir,
-        os.path.dirname(base_dir),
-        os.getcwd(),
-    ]
+    diretorios_base = obter_diretorios_base()
 
     entrada_dir, entradas_tentadas = encontrar_diretorio_com_arquivos(
         diretorios_base,
@@ -380,14 +445,8 @@ def processar_relatorio():
 
         colunas_rodar_padrao = ['IONIX', 'Data Criacao', 'Sigla Estado', 'MATERIAL', 'ENDEREÇO', 'QTD CABO', 'Possui Material?']
 
-        if os.path.exists(output_file):
-            pass
-            print("[OK] Arquivo de saída existente localizado")
-        else:
-            raise FileNotFoundError(
-                f"Arquivo de saída .xlsb não encontrado em {output_file}. "
-                "Ele precisa existir para preservar as abas CRIAR OR e MODELO LARA."
-            )
+        garantir_arquivo_saida(output_file, diretorios_base)
+        print("[OK] Arquivo de saída localizado/criado")
 
         print(f"[OK] Registros para a aba RODAR: {len(df_rodar):,}")
         print()
