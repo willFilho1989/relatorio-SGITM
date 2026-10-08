@@ -197,9 +197,24 @@ def obter_coluna_por_nome(df, nome_esperado):
             return coluna
     return None
 
+def coluna_eh_data(nome_coluna):
+    nome_normalizado = normalizar_nome_coluna(nome_coluna)
+    return "data" in nome_normalizado.split(" ")
+
+def formatar_valor_data_ddmmyyyy(valor):
+    texto = str(valor).strip()
+    if not texto:
+        return ""
+    data = pd.to_datetime(texto, errors="coerce", dayfirst=True)
+    if pd.isna(data):
+        return texto
+    return data.strftime("%d/%m/%Y")
+
 def escrever_df_em_aba_excel(ws, df_aba):
     df_texto = df_aba.fillna('').astype(str).copy()
     for col in df_texto.columns:
+        if coluna_eh_data(col):
+            df_texto[col] = df_texto[col].map(formatar_valor_data_ddmmyyyy)
         serie = df_texto[col]
         serie = serie.map(lambda x: ''.join(ch for ch in str(x) if ord(ch) >= 32 or ch in ('\t', '\n', '\r')))
         serie = serie.map(lambda x: x[:32767] if len(x) > 32767 else x)
@@ -214,6 +229,14 @@ def escrever_df_em_aba_excel(ws, df_aba):
 
     nrows = len(valores)
     ncols = len(valores[0])
+    colunas_data = [
+        indice + 1
+        for indice, nome_coluna in enumerate(cabecalhos)
+        if coluna_eh_data(nome_coluna)
+    ]
+    if nrows > 1:
+        for indice_coluna in colunas_data:
+            ws.Range(ws.Cells(2, indice_coluna), ws.Cells(nrows, indice_coluna)).NumberFormat = "@"
     intervalo = ws.Range(ws.Cells(1, 1), ws.Cells(nrows, ncols))
     intervalo.Value = tuple(tuple(linha) for linha in valores)
     intervalo.WrapText = False
